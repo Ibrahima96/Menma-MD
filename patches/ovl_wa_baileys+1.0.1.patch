@@ -1,0 +1,144 @@
+diff --git a/node_modules/ovl_wa_baileys/lib/Socket/groups.js b/node_modules/ovl_wa_baileys/lib/Socket/groups.js
+index e8bfde3..fcfa114 100644
+--- a/node_modules/ovl_wa_baileys/lib/Socket/groups.js
++++ b/node_modules/ovl_wa_baileys/lib/Socket/groups.js
+@@ -292,6 +292,7 @@ const extractGroupMetadata = (result) => {
+         participants: (0, WABinary_1.getBinaryNodeChildren)(group, 'participant').map(({ attrs }) => {
+             return {
+                 id: attrs.jid,
++                lid: attrs.lid || attrs.lidJid || null,
+                 admin: (attrs.type || null),
+             };
+         }),
+diff --git a/node_modules/ovl_wa_baileys/lib/Socket/messages-send.js b/node_modules/ovl_wa_baileys/lib/Socket/messages-send.js
+index 090a1b7..2df4a8b 100644
+--- a/node_modules/ovl_wa_baileys/lib/Socket/messages-send.js
++++ b/node_modules/ovl_wa_baileys/lib/Socket/messages-send.js
+@@ -195,27 +195,30 @@ const makeMessagesSocket = (config) => {
+             }
+         }
+         if (jidsRequiringFetch.length) {
+-            logger.debug({ jidsRequiringFetch }, 'fetching sessions');
+-            const result = await query({
+-                tag: 'iq',
+-                attrs: {
+-                    xmlns: 'encrypt',
+-                    type: 'get',
+-                    to: WABinary_1.S_WHATSAPP_NET,
+-                },
+-                content: [
+-                    {
+-                        tag: 'key',
+-                        attrs: {},
+-                        content: jidsRequiringFetch.map(jid => ({
+-                            tag: 'user',
+-                            attrs: { jid },
+-                        }))
+-                    }
+-                ]
+-            });
+-            await (0, Utils_1.parseAndInjectE2ESessions)(result, signalRepository);
+-            didFetchNewSession = true;
++            logger.debug({ jidsRequiringFetch }, 'fetching sessions 1 by 1 to avoid WA drops');
++            
++            // Fetch individually to prevent 1 bad jid from ruining valid ones
++            for (let i = 0; i < jidsRequiringFetch.length; i++) {
++                const jid = jidsRequiringFetch[i];
++                try {
++                    const result = await Promise.race([
++                        query({
++                            tag: 'iq',
++                            attrs: { xmlns: 'encrypt', type: 'get', to: WABinary_1.S_WHATSAPP_NET },
++                            content: [{
++                                tag: 'key',
++                                attrs: {},
++                                content: [{ tag: 'user', attrs: { jid } }]
++                            }]
++                        }),
++                        new Promise((_, reject) => setTimeout(() => reject(new Error('WA_FETCH_TIMEOUT')), 2500))
++                    ]);
++                    await (0, Utils_1.parseAndInjectE2ESessions)(result, signalRepository);
++                    didFetchNewSession = true;
++                } catch (err) {
++                    logger.warn({ jid, err: err.message }, 'Failed fetching session for JID, skipping to unblock...');
++                }
++            }
+         }
+         return didFetchNewSession;
+     };
+@@ -224,27 +227,31 @@ const makeMessagesSocket = (config) => {
+         const bytes = (0, Utils_1.encodeWAMessage)(patched);
+         let shouldIncludeDeviceIdentity = false;
+         const nodes = await Promise.all(jids.map(async (jid) => {
+-            const { type, ciphertext } = await signalRepository
+-                .encryptMessage({ jid, data: bytes });
+-            if (type === 'pkmsg') {
+-                shouldIncludeDeviceIdentity = true;
++            try {
++                const { type, ciphertext } = await signalRepository.encryptMessage({ jid, data: bytes });
++                if (type === 'pkmsg') {
++                    shouldIncludeDeviceIdentity = true;
++                }
++                const node = {
++                    tag: 'to',
++                    attrs: { jid },
++                    content: [{
++                            tag: 'enc',
++                            attrs: {
++                                v: '2',
++                                type,
++                                ...extraAttrs || {}
++                            },
++                            content: ciphertext
++                        }]
++                };
++                return node;
++            } catch (err) {
++                logger.warn({ jid, err: err.message }, 'Failed to encrypt message for participant, skipping');
++                return null;
+             }
+-            const node = {
+-                tag: 'to',
+-                attrs: { jid },
+-                content: [{
+-                        tag: 'enc',
+-                        attrs: {
+-                            v: '2',
+-                            type,
+-                            ...extraAttrs || {}
+-                        },
+-                        content: ciphertext
+-                    }]
+-            };
+-            return node;
+         }));
+-        return { nodes, shouldIncludeDeviceIdentity };
++        return { nodes: nodes.filter(n => n !== null), shouldIncludeDeviceIdentity };
+     };
+     const relayMessage = async (jid, message, { messageId: msgId, participant, additionalAttributes, useUserDevicesCache, cachedGroupMetadata, statusJidList }) => {
+         const meId = authState.creds.me.id;
+@@ -307,7 +314,14 @@ const makeMessagesSocket = (config) => {
+                     const additionalDevices = await getUSyncDevices(participantsList, !!useUserDevicesCache, false);
+                     devices.push(...additionalDevices);
+                 }
+-                const patched = await patchMessageBeforeSending(message, devices.map(d => (0, WABinary_1.jidEncode)(d.user, isLid ? 'lid' : 's.whatsapp.net', d.device)));
++                const getProperDomain = (u) => {
++                    if (isLid || (typeof u === 'string' && u.length >= 15)) return 'lid';
++                    if (isGroup && groupData) {
++                        if (groupData.participants.some(p => p.id === (u + '@lid') || p.id.startsWith(u + ':') && p.id.includes('@lid'))) return 'lid';
++                    }
++                    return 's.whatsapp.net';
++                };
++                const patched = await patchMessageBeforeSending(message, devices.map(d => (0, WABinary_1.jidEncode)(d.user, getProperDomain(d.user), d.device)));
+                 const bytes = (0, Utils_1.encodeWAMessage)(patched);
+                 const { ciphertext, senderKeyDistributionMessage } = await signalRepository.encryptGroupMessage({
+                     group: destinationJid,
+@@ -317,7 +331,7 @@ const makeMessagesSocket = (config) => {
+                 const senderKeyJids = [];
+                 // ensure a connection is established with every device
+                 for (const { user, device } of devices) {
+-                    const jid = (0, WABinary_1.jidEncode)(user, isLid ? 'lid' : 's.whatsapp.net', device);
++                    const jid = (0, WABinary_1.jidEncode)(user, getProperDomain(user), device);
+                     if (!senderKeyMap[jid] || !!participant) {
+                         senderKeyJids.push(jid);
+                         // store that this person has had the sender keys sent to them

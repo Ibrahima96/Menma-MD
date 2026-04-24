@@ -1,0 +1,35 @@
+diff --git a/node_modules/libsignal/src/session_builder.js b/node_modules/libsignal/src/session_builder.js
+index 9bd333f..ec9ee3c 100644
+--- a/node_modules/libsignal/src/session_builder.js
++++ b/node_modules/libsignal/src/session_builder.js
+@@ -43,7 +43,7 @@ class SessionBuilder {
+             } else {
+                 const openSession = record.getOpenSession();
+                 if (openSession) {
+-                    console.warn("Closing stale open session for new outgoing prekey bundle");
++                    // console.warn("Closing stale open session for new outgoing prekey bundle");
+                     record.closeSession(openSession);
+                 }
+             }
+@@ -71,7 +71,7 @@ class SessionBuilder {
+         }   
+         const existingOpenSession = record.getOpenSession();
+         if (existingOpenSession) {
+-            console.warn("Closing open session in favor of incoming prekey bundle");
++            // console.warn("Closing open session in favor of incoming prekey bundle");
+             record.closeSession(existingOpenSession);
+         }
+         record.setSession(await this.initSession(false, preKeyPair, signedPreKeyPair,
+diff --git a/node_modules/libsignal/src/session_record.js b/node_modules/libsignal/src/session_record.js
+index 7626a39..dfaed4d 100644
+--- a/node_modules/libsignal/src/session_record.js
++++ b/node_modules/libsignal/src/session_record.js
+@@ -270,7 +270,7 @@ class SessionRecord {
+             console.warn("Session already closed", session);
+             return;
+         }
+-        console.info("Closing session:", session);
++        // console.info("Closing session:", session);
+         session.indexInfo.closed = Date.now();
+     }
+ 
